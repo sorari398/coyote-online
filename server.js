@@ -39,6 +39,7 @@ function calculateTotal(players) {
 
 // --- Socket.io 通信ロジック ---
 io.on("connection", (socket) => {
+  // ルーム参加
   socket.on("joinRoom", ({ roomName, userName }) => {
     if (!rooms[roomName]) {
       rooms[roomName] = { 
@@ -48,18 +49,33 @@ io.on("connection", (socket) => {
       };
     }
     const room = rooms[roomName];
+
     if (room.players.some(p => p.name === userName)) {
       socket.emit("joinError", "その名前はすでに使われています。");
       return;
     }
+
     socket.join(roomName);
-    room.players.push({ id: socket.id, name: userName || "名無し", card: 0, isHost: room.players.length === 1, life: 3 });
+
+    // ★修正：部屋にすでにホストがいるか確認
+    const hasHost = room.players.some(p => p.isHost === true);
+
+    const newPlayer = { 
+      id: socket.id, 
+      name: userName || "名無し", 
+      card: 0, 
+      isHost: !hasHost, // ホストがいなければ自分がホストになる
+      life: 3 
+    };
+
+    room.players.push(newPlayer);
     io.to(roomName).emit("updateState", room);
   });
 
+  // ゲーム開始
   socket.on("startGame", (roomName) => {
     const room = rooms[roomName];
-    if (room) {
+    if (room && room.gameStatus !== "playing") {
       room.gameStatus = "playing";
       room.lastCount = 0; room.currentTurn = 0; room.history = [];
       room.deck = [...INITIAL_DECK]; room.needsShuffle = false;
@@ -74,6 +90,7 @@ io.on("connection", (socket) => {
     }
   });
 
+  // 数字の宣言
   socket.on("declare", ({ roomName, num }) => {
     const room = rooms[roomName];
     if (room?.gameStatus === "playing") {
@@ -81,28 +98,37 @@ io.on("connection", (socket) => {
       const playerName = room.players[room.currentTurn].name;
       room.lastCount = num;
       room.history.unshift({ name: playerName, count: num });
+      
+      // 次の生存プレイヤーにターンを回す
       do {
         room.currentTurn = (room.currentTurn + 1) % room.players.length;
       } while (room.players[room.currentTurn].life <= 0);
+      
       room.gameMessage = `${playerName}が ${num} を宣言。`;
       io.to(roomName).emit("updateState", room);
     }
   });
 
+  // コヨーテ！
   socket.on("callCoyote", (roomName) => {
     const room = rooms[roomName];
     if (room?.gameStatus === "playing") {
       const total = calculateTotal(room.players);
       const caller = room.players.find(p => p.id === socket.id);
+      
+      // 前の生存プレイヤーを探す
       let prevIdx = (room.currentTurn + room.players.length - 1) % room.players.length;
       while (room.players[prevIdx].life <= 0) {
         prevIdx = (prevIdx + room.players.length - 1) % room.players.length;
       }
       const prevPlayer = room.players[prevIdx];
+
       let loser = room.lastCount > total ? prevPlayer : caller;
       loser.life -= 1;
+
       room.gameStatus = "result";
       room.gameMessage = `判定：合計は【${total}】！負けは【${loser.name}】`;
+      
       const survivors = room.players.filter(p => p.life > 0);
       if (survivors.length === 1) {
         room.gameMessage = `🎊 優勝は【${survivors[0].name}】です！！ 🎊`;
@@ -112,6 +138,7 @@ io.on("connection", (socket) => {
     }
   });
 
+  // 次のラウンド
   socket.on("nextRound", (roomName) => {
     const room = rooms[roomName];
     if (room) {
@@ -132,33 +159,32 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("disconnect", () => {
-    for (const roomName in rooms) {
+  // 切断処理
+  socket.on("disconnecting", () => {
+    for (const roomName of socket.rooms) {
       const room = rooms[roomName];
-      const index = room.players.findIndex(p => p.id === socket.id);
-      if (index !== -1) {
-        room.players.splice(index, 1);
-        if (room.players.length === 0) {
-          delete rooms[roomName];
-        } else {
-          room.players[0].isHost = true;
-          io.to(roomName).emit("updateState", room);
+      if (room) {
+        const index = room.players.findIndex(p => p.id === socket.id);
+        if (index !== -1) {
+          const wasHost = room.players[index].isHost;
+          room.players.splice(index, 1);
+          if (room.players.length === 0) {
+            delete rooms[roomName];
+          } else {
+            if (wasHost) room.players[0].isHost = true;
+            io.to(roomName).emit("updateState", room);
+          }
         }
       }
     }
   });
 });
 
-// --- 本番環境用の配信設定 (ここが重要！) ---
-if (process.env.NODE_ENV === 'production') {
-  // Reactのビルドフォルダ（client/build）を静的ファイルとして提供
-  app.use(express.static(path.join(__dirname, 'client/build')));
-  
-  // どんなリクエストに対してもReactのindex.htmlを返す
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
-  });
-}
+// 静的ファイルの配信
+app.use(express.static(path.join(__dirname, 'client/build')));
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'client/build', 'index.html'));
+});
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
