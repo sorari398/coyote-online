@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 
-const socket = io('http://localhost:3001');
+const socket = io(); // カッコの中を空っぽにする！
 
 function App() {
   const [roomName, setRoomName] = useState("");
